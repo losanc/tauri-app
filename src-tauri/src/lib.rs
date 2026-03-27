@@ -80,19 +80,18 @@ pub fn run() {
                 };
 
                 #[cfg(not(target_os = "macos"))]
-                let target = wgpu::SurfaceTargetUnsafe::from_display_and_window(&window, &window)
-                    .unwrap();
+                let target =
+                    wgpu::SurfaceTargetUnsafe::from_display_and_window(&window, &window).unwrap();
 
                 instance.create_surface_unsafe(target).unwrap()
             };
 
-            let adapter = pollster::block_on(instance.request_adapter(
-                &wgpu::RequestAdapterOptions {
+            let adapter =
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                     compatible_surface: Some(&surface),
                     ..Default::default()
-                },
-            ))
-            .unwrap();
+                }))
+                .unwrap();
 
             println!("adapter: {}", adapter.get_info().name);
 

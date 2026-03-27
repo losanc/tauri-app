@@ -62,9 +62,8 @@ pub fn App() -> impl IntoView {
                     .request_adapter(&wgpu::RequestAdapterOptions::default())
                     .await
                     .unwrap();
-    leptos::logging::log!("!!!!!!!!!! {}",adapter.get_info().name);
+                leptos::logging::log!("!!!!!!!!!! {}", adapter.get_info().name);
 
-                
                 let (device, queue) = adapter
                     .request_device(&wgpu::DeviceDescriptor::default())
                     .await
