@@ -16,15 +16,15 @@ struct Greet {
 
 #[tauri::command]
 fn greet(input: Greet) -> String {
-    format!("Hello, ! You've been greeted from Rust!")
+    format!("Hello, {} ! You've been greeted from Rust!", input.name)
 }
 
 /// Creates a CAMetalLayer on top of the webview's content view and returns a raw pointer to it.
 /// The layer is retained by its parent NSView (ObjC ARC) for the lifetime of the window.
 #[cfg(target_os = "macos")]
-unsafe fn add_metal_overlay(window: &WebviewWindow) -> *mut std::ffi::c_void {
-    use objc2::msg_send;
-    use objc2::runtime::{AnyClass, AnyObject, Bool};
+fn add_metal_overlay(window: &WebviewWindow) -> *mut std::ffi::c_void {
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::NSView;
     use objc2_foundation::{NSPoint, NSRect, NSSize};
     use wgpu::rwh::{HasWindowHandle, RawWindowHandle};
 
@@ -36,30 +36,25 @@ unsafe fn add_metal_overlay(window: &WebviewWindow) -> *mut std::ffi::c_void {
         _ => panic!("expected AppKit window handle on macOS"),
     };
 
-    // Walk up to the NSWindow, then grab its contentView as the insertion point.
-    let ns_window: *mut AnyObject = msg_send![ns_view, window];
-    let content_view: *mut AnyObject = msg_send![ns_window, contentView];
+    let ns_view = unsafe { &(*ns_view) };
+    if let Some(view) = ns_view.downcast_ref::<NSView>() {
+        use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained};
+        use objc2_quartz_core::CAMetalLayer;
+        let window = view.window().expect("failed to create window");
+        let context_view = window.contentView().expect("failed to create content view");
 
-    // Small fixed rect in the top-left corner — just enough to verify compositing.
-    let overlay_rect = NSRect::new(NSPoint::new(20.0, 20.0), NSSize::new(200.0, 200.0));
+        let metal_rect = NSRect::new(NSPoint::new(20.0, 20.0), NSSize::new(200.0, 200.0));
 
-    // Plain NSView that will host the Metal layer.
-    let ns_view_class = AnyClass::get(c"NSView").unwrap();
-    let overlay: *mut AnyObject = msg_send![ns_view_class, alloc];
-    let overlay: *mut AnyObject = msg_send![overlay, initWithFrame: overlay_rect];
-
-    // Enable layer-backing so setLayer: below takes effect.
-    let _: () = msg_send![overlay, setWantsLayer: Bool::YES];
-
-    // CAMetalLayer is the surface wgpu will render into.
-    let layer_class = AnyClass::get(c"CAMetalLayer").unwrap();
-    let layer: *mut AnyObject = msg_send![layer_class, new];
-    let _: () = msg_send![overlay, setLayer: layer];
-
-    // addSubview: appends to the end of the subview list → drawn on top.
-    let _: () = msg_send![content_view, addSubview: overlay];
-
-    layer as *mut std::ffi::c_void
+        let mtm = MainThreadMarker::new().expect("must be on the main thread");
+        let metal_view = NSView::initWithFrame(NSView::alloc(mtm), metal_rect);
+        metal_view.setWantsLayer(true);
+        let metal_layer = CAMetalLayer::new();
+        metal_view.setLayer(Some(&metal_layer));
+        context_view.addSubview(&metal_view);
+        Retained::as_ptr(&metal_layer) as *mut std::ffi::c_void
+    } else {
+        panic!("where is my view?");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
