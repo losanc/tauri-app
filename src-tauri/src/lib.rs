@@ -25,7 +25,7 @@ fn greet(input: Greet) -> String {
 unsafe fn add_metal_overlay(window: &WebviewWindow) -> *mut std::ffi::c_void {
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject, Bool};
-    use objc2_foundation::NSRect;
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
     use wgpu::rwh::{HasWindowHandle, RawWindowHandle};
 
     // Tauri's WebviewWindow implements HasWindowHandle (rwh 0.6).
@@ -39,12 +39,14 @@ unsafe fn add_metal_overlay(window: &WebviewWindow) -> *mut std::ffi::c_void {
     // Walk up to the NSWindow, then grab its contentView as the insertion point.
     let ns_window: *mut AnyObject = msg_send![ns_view, window];
     let content_view: *mut AnyObject = msg_send![ns_window, contentView];
-    let bounds: NSRect = msg_send![content_view, bounds];
+
+    // Small fixed rect in the top-left corner — just enough to verify compositing.
+    let overlay_rect = NSRect::new(NSPoint::new(20.0, 20.0), NSSize::new(200.0, 200.0));
 
     // Plain NSView that will host the Metal layer.
     let ns_view_class = AnyClass::get(c"NSView").unwrap();
     let overlay: *mut AnyObject = msg_send![ns_view_class, alloc];
-    let overlay: *mut AnyObject = msg_send![overlay, initWithFrame: bounds];
+    let overlay: *mut AnyObject = msg_send![overlay, initWithFrame: overlay_rect];
 
     // Enable layer-backing so setLayer: below takes effect.
     let _: () = msg_send![overlay, setWantsLayer: Bool::YES];
@@ -53,9 +55,6 @@ unsafe fn add_metal_overlay(window: &WebviewWindow) -> *mut std::ffi::c_void {
     let layer_class = AnyClass::get(c"CAMetalLayer").unwrap();
     let layer: *mut AnyObject = msg_send![layer_class, new];
     let _: () = msg_send![overlay, setLayer: layer];
-
-    // Auto-resize with the parent: NSViewWidthSizable(2) | NSViewHeightSizable(16) = 18
-    let _: () = msg_send![overlay, setAutoresizingMask: 18usize];
 
     // addSubview: appends to the end of the subview list → drawn on top.
     let _: () = msg_send![content_view, addSubview: overlay];
@@ -101,14 +100,13 @@ pub fn run() {
                 pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                     .unwrap();
 
-            let size = window.inner_size().unwrap();
             let caps = surface.get_capabilities(&adapter);
 
             let config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format: caps.formats[0],
-                width: size.width,
-                height: size.height,
+                width: 200,
+                height: 200,
                 present_mode: wgpu::PresentMode::Fifo,
                 alpha_mode: wgpu::CompositeAlphaMode::Auto,
                 view_formats: vec![],
