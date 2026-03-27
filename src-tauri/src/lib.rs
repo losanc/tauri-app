@@ -1,19 +1,10 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+use tauri::{Manager, RunEvent, WebviewWindow};
+use wgpu::CurrentSurfaceTexture;
 
-use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindow, Window, WindowEvent};
-use wgpu::{
-    CurrentSurfaceTexture,
-    rwh::{HasRawDisplayHandle, HasRawWindowHandle},
-};
-
-use std::{os::macos::raw::stat, sync::Mutex};
-
-struct WgpuState<'a> {
-    // put your wgpu stuff here
-    surface: wgpu::Surface<'a>,
+struct WgpuState {
+    surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    window: WebviewWindow,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -25,50 +16,97 @@ struct Greet {
 
 #[tauri::command]
 fn greet(input: Greet) -> String {
-    let id = std::thread::current().id();
-    println!("new id {:?}", id);
-
     format!("Hello, ! You've been greeted from Rust!")
+}
+
+/// Creates a CAMetalLayer on top of the webview's content view and returns a raw pointer to it.
+/// The layer is retained by its parent NSView (ObjC ARC) for the lifetime of the window.
+#[cfg(target_os = "macos")]
+unsafe fn add_metal_overlay(window: &WebviewWindow) -> *mut std::ffi::c_void {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    use objc2_foundation::NSRect;
+    use wgpu::rwh::{HasWindowHandle, RawWindowHandle};
+
+    // Tauri's WebviewWindow implements HasWindowHandle (rwh 0.6).
+    // AppKitWindowHandle::ns_view is the WKWebView (or its container NSView).
+    let handle = window.window_handle().unwrap();
+    let ns_view: *mut AnyObject = match handle.as_raw() {
+        RawWindowHandle::AppKit(h) => h.ns_view.as_ptr() as *mut AnyObject,
+        _ => panic!("expected AppKit window handle on macOS"),
+    };
+
+    // Walk up to the NSWindow, then grab its contentView as the insertion point.
+    let ns_window: *mut AnyObject = msg_send![ns_view, window];
+    let content_view: *mut AnyObject = msg_send![ns_window, contentView];
+    let bounds: NSRect = msg_send![content_view, bounds];
+
+    // Plain NSView that will host the Metal layer.
+    let ns_view_class = AnyClass::get(c"NSView").unwrap();
+    let overlay: *mut AnyObject = msg_send![ns_view_class, alloc];
+    let overlay: *mut AnyObject = msg_send![overlay, initWithFrame: bounds];
+
+    // Enable layer-backing so setLayer: below takes effect.
+    let _: () = msg_send![overlay, setWantsLayer: Bool::YES];
+
+    // CAMetalLayer is the surface wgpu will render into.
+    let layer_class = AnyClass::get(c"CAMetalLayer").unwrap();
+    let layer: *mut AnyObject = msg_send![layer_class, new];
+    let _: () = msg_send![overlay, setLayer: layer];
+
+    // Auto-resize with the parent: NSViewWidthSizable(2) | NSViewHeightSizable(16) = 18
+    let _: () = msg_send![overlay, setAutoresizingMask: 18usize];
+
+    // addSubview: appends to the end of the subview list → drawn on top.
+    let _: () = msg_send![content_view, addSubview: overlay];
+
+    layer as *mut std::ffi::c_void
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let id = std::thread::current().id();
-    println!("main {:?}", id);
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();
-
-            // println!("{:?}", window2);
-
-            // Spawn async GPU init
             let instance = wgpu::Instance::default();
 
-            // SAFETY: Tauri window provides valid raw handles
-            let surface = unsafe {
-                instance.create_surface_unsafe(
-                    wgpu::SurfaceTargetUnsafe::from_display_and_window(&window, &window).unwrap(),
-                )
-            }
+            // On macOS: render into a CAMetalLayer added on top of the webview.
+            // On other platforms: render into the window surface directly.
+            let surface: wgpu::Surface<'static> = unsafe {
+                #[cfg(target_os = "macos")]
+                let target = {
+                    let layer_ptr = add_metal_overlay(&window);
+                    wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_ptr)
+                };
+
+                #[cfg(not(target_os = "macos"))]
+                let target = wgpu::SurfaceTargetUnsafe::from_display_and_window(&window, &window)
+                    .unwrap();
+
+                instance.create_surface_unsafe(target).unwrap()
+            };
+
+            let adapter = pollster::block_on(instance.request_adapter(
+                &wgpu::RequestAdapterOptions {
+                    compatible_surface: Some(&surface),
+                    ..Default::default()
+                },
+            ))
             .unwrap();
 
-            let adapter = pollster::block_on(
-                instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
-            )
-            .unwrap();
-
-        println!("!!!!!!!!!! {}",adapter.get_info().name);
+            println!("adapter: {}", adapter.get_info().name);
 
             let (device, queue) =
                 pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                     .unwrap();
 
             let size = window.inner_size().unwrap();
+            let caps = surface.get_capabilities(&adapter);
 
             let config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: surface.get_capabilities(&adapter).formats[0],
+                format: caps.formats[0],
                 width: size.width,
                 height: size.height,
                 present_mode: wgpu::PresentMode::Fifo,
@@ -78,17 +116,12 @@ pub fn run() {
             };
 
             surface.configure(&device, &config);
-
-            let state = WgpuState {
+            app.manage(WgpuState {
                 surface,
                 device,
                 queue,
-                window,
-            };
-
-            app.manage(state);
+            });
             Ok(())
-            // use instance + handle to create surface
         })
         .invoke_handler(tauri::generate_handler![greet])
         .build(tauri::generate_context!())
@@ -99,11 +132,9 @@ pub fn run() {
                 let frame = state.surface.get_current_texture();
                 if let CurrentSurfaceTexture::Success(texture) = frame {
                     let view = texture.texture.create_view(&Default::default());
-
                     let mut encoder = state
                         .device
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-
                     {
                         encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: None,
@@ -122,9 +153,7 @@ pub fn run() {
                             multiview_mask: None,
                         });
                     }
-
                     state.queue.submit(Some(encoder.finish()));
-
                     texture.present();
                 }
             }
